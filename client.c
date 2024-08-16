@@ -13,7 +13,7 @@
 #define SCREEN_WIDTH 1024
 #define SCREEN_HEIGHT 640
 #define WORM_RADIUS 3
-#define MAX_WORMS 20
+#define MAX_WORMS 6
 #define INPUT_BUFFER_SIZE 10
 #define WORM_SPEED 2.0
 #define TURN_SPEED 0.1

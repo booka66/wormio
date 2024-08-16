@@ -9,7 +9,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define MAX_CLIENTS 20
+#define MAX_CLIENTS 6
 #define SCREEN_WIDTH 1024
 #define SCREEN_HEIGHT 640
 #define WORM_SPEED 2.0
