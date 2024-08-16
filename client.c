@@ -18,7 +18,7 @@
 #define WORM_SPEED 2.0
 #define TURN_SPEED 0.1
 #define WORM_RADIUS 3
-#define MAX_PATH_LENGTH 100
+#define MAX_PATH_LENGTH 150
 #define INPUT_BUFFER_SIZE 10
 
 #define CLIENT_TICK_RATE 60 // Hz
@@ -53,7 +53,7 @@ pthread_mutex_t input_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 SDL_Color colors[MAX_WORMS] = {
     {239, 71, 111, 255}, {247, 140, 107, 255}, {255, 209, 102, 255},
-    {6, 214, 160, 255},  {17, 138, 178, 255},  {7, 59, 76, 255},
+    {6, 214, 160, 255},  {17, 138, 178, 255},  {83, 141, 34, 255},
 };
 
 void drawThickLine(SDL_Renderer *renderer, int x1, int y1, int x2, int y2) {
@@ -404,7 +404,7 @@ int main(int argc, char *args[]) {
       send_input(input);
     }
 
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255); // Dark gray background
     SDL_RenderClear(renderer);
 
     for (int i = 0; i < num_worms; i++) {

@@ -17,8 +17,7 @@
 #define WORM_SPEED 2.0
 #define TURN_SPEED 0.1
 #define WORM_RADIUS 3
-#define MAX_PATH_LENGTH 100
-#define MAX_PATH_SEND 200
+#define MAX_PATH_LENGTH 150
 
 #define SPAWN_CIRCLE_RADIUS 50
 
@@ -133,7 +132,7 @@ void updateWorm(int clientIndex) {
 }
 
 void handle_client(int client_socket) {
-  char buffer[1024];
+  char buffer[8192];
   int n;
 
   while ((n = recv(client_socket, buffer, sizeof(buffer), 0)) > 0) {
