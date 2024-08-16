@@ -49,26 +49,26 @@ int input_buffer_count = 0;
 pthread_mutex_t input_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 SDL_Color colors[MAX_WORMS] = {
-    {255, 0, 0, 255},     // Red
-    {0, 255, 0, 255},     // Green
-    {0, 0, 255, 255},     // Blue
-    {255, 255, 0, 255},   // Yellow
-    {255, 0, 255, 255},   // Magenta
-    {0, 255, 255, 255},   // Cyan
-    {255, 128, 0, 255},   // Orange
-    {128, 0, 255, 255},   // Purple
-    {0, 255, 128, 255},   // Lime
-    {128, 255, 0, 255},   // Chartreuse
-    {255, 0, 128, 255},   // Pink
-    {0, 128, 255, 255},   // Sky Blue
-    {255, 128, 128, 255}, // Light Red
-    {128, 255, 128, 255}, // Light Green
-    {128, 128, 255, 255}, // Light Blue
-    {255, 255, 128, 255}, // Light Yellow
-    {255, 128, 255, 255}, // Light Magenta
-    {128, 255, 255, 255}, // Light Cyan
-    {192, 192, 192, 255}, // Light Gray
-    {128, 128, 128, 255}  // Gray
+    {255, 0, 0, 255},   // Red
+    {0, 255, 0, 255},   // Green
+    {0, 0, 255, 255},   // Blue
+    {255, 255, 0, 255}, // Yellow
+    {255, 0, 255, 255}, // Magenta
+    {0, 255, 255, 255}, // Cyan
+                        // {255, 128, 0, 255},   // Orange
+                        // {128, 0, 255, 255},   // Purple
+                        // {0, 255, 128, 255},   // Lime
+                        // {128, 255, 0, 255},   // Chartreuse
+                        // {255, 0, 128, 255},   // Pink
+                        // {0, 128, 255, 255},   // Sky Blue
+                        // {255, 128, 128, 255}, // Light Red
+                        // {128, 255, 128, 255}, // Light Green
+                        // {128, 128, 255, 255}, // Light Blue
+                        // {255, 255, 128, 255}, // Light Yellow
+                        // {255, 128, 255, 255}, // Light Magenta
+                        // {128, 255, 255, 255}, // Light Cyan
+                        // {192, 192, 192, 255}, // Light Gray
+                        // {128, 128, 128, 255}  // Gray
 };
 
 void drawThickLine(SDL_Renderer *renderer, int x1, int y1, int x2, int y2) {
