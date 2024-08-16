@@ -10,17 +10,20 @@
 #include <unistd.h>
 
 #define MAX_CLIENTS 6
+
 #define SCREEN_WIDTH 1024
 #define SCREEN_HEIGHT 640
+
 #define WORM_SPEED 2.0
 #define TURN_SPEED 0.1
-#define PI 3.14159265
 #define WORM_RADIUS 3
-#define INPUT_BUFFER_SIZE 10
-#define SPAWN_CIRCLE_RADIUS 100
-#define MAX_PATH_LENGTH 200
+#define MAX_PATH_LENGTH 100
 #define MAX_PATH_SEND 200
-#define GRACE_PERIOD 180
+
+#define SPAWN_CIRCLE_RADIUS 50
+
+#define INPUT_BUFFER_SIZE 10
+#define PI 3.14159265
 
 typedef struct {
   float x;
@@ -145,9 +148,10 @@ void handle_client(int client_socket) {
         float startX = SCREEN_WIDTH / 2.0 + SPAWN_CIRCLE_RADIUS * cos(angle);
         float startY = SCREEN_HEIGHT / 2.0 + SPAWN_CIRCLE_RADIUS * sin(angle);
         float spawnAngle = angle; // Face outward
+        // Add random offset to angle
+        spawnAngle += (rand() % 100) / 100.0 - 0.5;
 
         initWorm(&clients[num_clients].worm, startX, startY, spawnAngle);
-        clients[num_clients].grace_ticks = GRACE_PERIOD;
 
         char id_msg[20];
         snprintf(id_msg, sizeof(id_msg), "PLAYER_ID %d", num_clients);

@@ -10,16 +10,19 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#define MAX_WORMS 6
+
 #define SCREEN_WIDTH 1024
 #define SCREEN_HEIGHT 640
-#define WORM_RADIUS 3
-#define MAX_WORMS 6
-#define INPUT_BUFFER_SIZE 10
+
 #define WORM_SPEED 2.0
 #define TURN_SPEED 0.1
+#define WORM_RADIUS 3
+#define MAX_PATH_LENGTH 100
+#define INPUT_BUFFER_SIZE 10
+
 #define CLIENT_TICK_RATE 60 // Hz
 #define GRACE_PERIOD 3000   // 3 seconds in milliseconds
-#define MAX_PATH_LENGTH 200
 
 typedef struct {
   float x;
@@ -49,26 +52,8 @@ int input_buffer_count = 0;
 pthread_mutex_t input_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 SDL_Color colors[MAX_WORMS] = {
-    {255, 0, 0, 255},   // Red
-    {0, 255, 0, 255},   // Green
-    {0, 0, 255, 255},   // Blue
-    {255, 255, 0, 255}, // Yellow
-    {255, 0, 255, 255}, // Magenta
-    {0, 255, 255, 255}, // Cyan
-                        // {255, 128, 0, 255},   // Orange
-                        // {128, 0, 255, 255},   // Purple
-                        // {0, 255, 128, 255},   // Lime
-                        // {128, 255, 0, 255},   // Chartreuse
-                        // {255, 0, 128, 255},   // Pink
-                        // {0, 128, 255, 255},   // Sky Blue
-                        // {255, 128, 128, 255}, // Light Red
-                        // {128, 255, 128, 255}, // Light Green
-                        // {128, 128, 255, 255}, // Light Blue
-                        // {255, 255, 128, 255}, // Light Yellow
-                        // {255, 128, 255, 255}, // Light Magenta
-                        // {128, 255, 255, 255}, // Light Cyan
-                        // {192, 192, 192, 255}, // Light Gray
-                        // {128, 128, 128, 255}  // Gray
+    {239, 71, 111, 255}, {247, 140, 107, 255}, {255, 209, 102, 255},
+    {6, 214, 160, 255},  {17, 138, 178, 255},  {7, 59, 76, 255},
 };
 
 void drawThickLine(SDL_Renderer *renderer, int x1, int y1, int x2, int y2) {
