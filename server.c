@@ -7,27 +7,48 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define MAX_CLIENTS 6
-
-#define SCREEN_WIDTH 1024
-#define SCREEN_HEIGHT 640
-
+#define SCREEN_WIDTH (int)(1024 * 1.5)
+#define SCREEN_HEIGHT (int)(640 * 1.5)
 #define WORM_SPEED 2.0
+#define SPEED_BOOST_MULTIPLIER 2.0
 #define TURN_SPEED 0.1
 #define WORM_RADIUS 3
 #define MAX_PATH_LENGTH 150
-
-#define SPAWN_CIRCLE_RADIUS 50
-
 #define INPUT_BUFFER_SIZE 10
 #define PI 3.14159265
+#define MAX_BULLETS 3
+#define BULLET_SPEED 12
+#define POWERUP_SPAWN_INTERVAL 10
+#define MAX_POWERUPS 3
+#define SPAWN_CIRCLE_RADIUS 50
+#define POWERUP_RADIUS 10
+#define BULLET_RADIUS 5
+#define TAIL_COLLISION_THRESHOLD 10
+#define INVINCIIBILITY_TIME 2
+#define SPEED_BOOST_DURATION 3.0
 
 typedef struct {
   float x;
   float y;
 } Point;
+
+typedef struct {
+  Point position;
+  float angle;
+  bool active;
+} Bullet;
+
+typedef enum { POWERUP_BULLETS, POWERUP_SPEED } PowerupType;
+
+typedef struct {
+  Point position;
+  PowerupType type;
+  bool active;
+} Powerup;
 
 typedef struct {
   Point position;
@@ -38,18 +59,25 @@ typedef struct {
   pthread_mutex_t input_mutex;
   Point path[MAX_PATH_LENGTH];
   int path_length;
+  int bullets_left;
+  Bullet bullets[MAX_BULLETS];
+  time_t invincibility_end;
+  float speed_boost_time_left;
+  bool speed_boost_active;
 } Worm;
 
 typedef struct {
   int socket;
   Worm worm;
-  int grace_ticks;
 } Client;
 
 Client clients[MAX_CLIENTS];
 int num_clients = 0;
 bool game_started = false;
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+Powerup powerups[MAX_POWERUPS];
+int active_powerups = 0;
+time_t last_powerup_spawn = 0;
 
 void initWorm(Worm *worm, float startX, float startY, float angle) {
   worm->position.x = startX;
@@ -60,13 +88,19 @@ void initWorm(Worm *worm, float startX, float startY, float angle) {
   pthread_mutex_init(&worm->input_mutex, NULL);
   worm->path[0] = (Point){startX, startY};
   worm->path_length = 1;
+  worm->bullets_left = 0;
+  for (int i = 0; i < MAX_BULLETS; i++) {
+    worm->bullets[i].active = false;
+  }
+  worm->invincibility_end = time(NULL) + INVINCIIBILITY_TIME;
+  worm->speed_boost_time_left = 0;
+  worm->speed_boost_active = false;
 }
 
 void addPointToPath(Worm *worm, Point newPoint) {
   if (worm->path_length < MAX_PATH_LENGTH) {
     worm->path[worm->path_length++] = newPoint;
   } else {
-    // Shift the path array to make room for the new point
     for (int i = 1; i < MAX_PATH_LENGTH; i++) {
       worm->path[i - 1] = worm->path[i];
     }
@@ -74,11 +108,37 @@ void addPointToPath(Worm *worm, Point newPoint) {
   }
 }
 
-bool checkCollision(Worm *worm, Point newPosition, int currentClient) {
+bool checkTailCollision(Worm *worm, Point newPosition) {
+  int start = (worm->path_length > TAIL_COLLISION_THRESHOLD)
+                  ? worm->path_length - TAIL_COLLISION_THRESHOLD
+                  : 0;
+
+  for (int i = 0; i < start; i++) {
+    float dx = newPosition.x - worm->path[i].x;
+    float dy = newPosition.y - worm->path[i].y;
+    float distance = sqrt(dx * dx + dy * dy);
+    if (distance < WORM_RADIUS * 2) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool checkCollision(Worm *worm, Point newPosition) {
+  if (time(NULL) < worm->invincibility_end) {
+    return false;
+  }
+
+  if (checkTailCollision(worm, newPosition)) {
+    return true;
+  }
+
+  // Check collision with other worms
   for (int i = 0; i < num_clients; i++) {
-    if (i == currentClient)
-      continue; // Don't collide with self
     Worm *otherWorm = &clients[i].worm;
+    if (otherWorm == worm || !otherWorm->alive)
+      continue;
+
     for (int j = 0; j < otherWorm->path_length; j++) {
       float dx = newPosition.x - otherWorm->path[j].x;
       float dy = newPosition.y - otherWorm->path[j].y;
@@ -91,17 +151,68 @@ bool checkCollision(Worm *worm, Point newPosition, int currentClient) {
   return false;
 }
 
+void spawnPowerup() {
+  if (active_powerups < MAX_POWERUPS) {
+    Powerup new_powerup;
+    new_powerup.position.x = rand() % SCREEN_WIDTH;
+    new_powerup.position.y = rand() % SCREEN_HEIGHT;
+    new_powerup.active = true;
+    new_powerup.type = (rand() % 2 == 0) ? POWERUP_BULLETS : POWERUP_SPEED;
+    powerups[active_powerups++] = new_powerup;
+    printf("Spawned powerup of type: %d at position (%.2f, %.2f)\n",
+           new_powerup.type, new_powerup.position.x, new_powerup.position.y);
+  }
+}
+
+void updateBullets(Worm *worm) {
+  for (int i = 0; i < MAX_BULLETS; i++) {
+    if (worm->bullets[i].active) {
+      worm->bullets[i].position.x += cos(worm->bullets[i].angle) * BULLET_SPEED;
+      worm->bullets[i].position.y += sin(worm->bullets[i].angle) * BULLET_SPEED;
+
+      // Check if bullet is out of bounds
+      if (worm->bullets[i].position.x < 0 ||
+          worm->bullets[i].position.x > SCREEN_WIDTH ||
+          worm->bullets[i].position.y < 0 ||
+          worm->bullets[i].position.y > SCREEN_HEIGHT) {
+        worm->bullets[i].active = false;
+      }
+    }
+  }
+}
+
+bool checkBulletCollision(Point bullet_pos, Worm *target_worm) {
+  float dx = bullet_pos.x - target_worm->position.x;
+  float dy = bullet_pos.y - target_worm->position.y;
+  float distance = sqrt(dx * dx + dy * dy);
+  return distance < (WORM_RADIUS + BULLET_RADIUS);
+}
+
 void updateWorm(int clientIndex) {
   Worm *worm = &clients[clientIndex].worm;
   if (!worm->alive)
     return;
 
   pthread_mutex_lock(&worm->input_mutex);
+  bool boost_pressed = false;
   if (worm->input_buffer_count > 0) {
     if (strcmp(worm->input_buffer[0], "LEFT") == 0) {
       worm->angle -= TURN_SPEED;
     } else if (strcmp(worm->input_buffer[0], "RIGHT") == 0) {
       worm->angle += TURN_SPEED;
+    } else if (strcmp(worm->input_buffer[0], "SHOOT") == 0 &&
+               worm->bullets_left > 0) {
+      for (int i = 0; i < MAX_BULLETS; i++) {
+        if (!worm->bullets[i].active) {
+          worm->bullets[i].position = worm->position;
+          worm->bullets[i].angle = worm->angle;
+          worm->bullets[i].active = true;
+          worm->bullets_left--;
+          break;
+        }
+      }
+    } else if (strcmp(worm->input_buffer[0], "BOOST") == 0) {
+      boost_pressed = true;
     }
     for (int i = 1; i < worm->input_buffer_count; i++) {
       strcpy(worm->input_buffer[i - 1], worm->input_buffer[i]);
@@ -110,24 +221,71 @@ void updateWorm(int clientIndex) {
   }
   pthread_mutex_unlock(&worm->input_mutex);
 
-  Point newPosition = {worm->position.x + cos(worm->angle) * WORM_SPEED,
-                       worm->position.y + sin(worm->angle) * WORM_SPEED};
+  float current_speed = WORM_SPEED;
+  if (boost_pressed && worm->speed_boost_time_left > 0) {
+    current_speed *= SPEED_BOOST_MULTIPLIER;
+    worm->speed_boost_time_left -= 1.0 / 60.0; // Assuming 60 FPS
+    if (worm->speed_boost_time_left <= 0) {
+      worm->speed_boost_time_left = 0;
+    }
+  }
 
-  // Wrap around screen edges
-  if (newPosition.x < 0)
-    newPosition.x = SCREEN_WIDTH;
-  if (newPosition.x > SCREEN_WIDTH)
-    newPosition.x = 0;
-  if (newPosition.y < 0)
-    newPosition.y = SCREEN_HEIGHT;
-  if (newPosition.y > SCREEN_HEIGHT)
-    newPosition.y = 0;
+  Point newPosition = {worm->position.x + cos(worm->angle) * current_speed,
+                       worm->position.y + sin(worm->angle) * current_speed};
 
-  if (!checkCollision(worm, newPosition, clientIndex)) {
+  newPosition.x = fmod(newPosition.x + SCREEN_WIDTH, SCREEN_WIDTH);
+  newPosition.y = fmod(newPosition.y + SCREEN_HEIGHT, SCREEN_HEIGHT);
+
+  if (checkCollision(worm, newPosition)) {
+    worm->alive = false;
+    if (checkTailCollision(worm, newPosition)) {
+      printf("Worm %d collided with its own tail!\n", clientIndex);
+    } else {
+      printf("Worm %d collided and died!\n", clientIndex);
+    }
+  } else {
     worm->position = newPosition;
     addPointToPath(worm, newPosition);
-  } else {
-    worm->alive = false;
+
+    for (int i = 0; i < active_powerups; i++) {
+      if (powerups[i].active) {
+        float dx = worm->position.x - powerups[i].position.x;
+        float dy = worm->position.y - powerups[i].position.y;
+        float distance = sqrt(dx * dx + dy * dy);
+        if (distance < POWERUP_RADIUS + WORM_RADIUS) {
+          if (powerups[i].type == POWERUP_BULLETS) {
+            worm->bullets_left = 3;
+            worm->speed_boost_time_left = 0;
+            worm->speed_boost_active = false;
+          } else if (powerups[i].type == POWERUP_SPEED) {
+            worm->speed_boost_time_left = SPEED_BOOST_DURATION;
+            worm->bullets_left = 0;
+          }
+          powerups[i].active = false;
+          // Move last active powerup to this slot and decrease count
+          powerups[i] = powerups[--active_powerups];
+          printf("Worm %d collected a powerup! Type: %d\n", clientIndex,
+                 powerups[i].type);
+        }
+      }
+    }
+  }
+
+  updateBullets(worm);
+
+  for (int i = 0; i < MAX_BULLETS; i++) {
+    if (worm->bullets[i].active) {
+      for (int j = 0; j < num_clients; j++) {
+        if (j != clientIndex && clients[j].worm.alive) {
+          if (checkBulletCollision(worm->bullets[i].position,
+                                   &clients[j].worm)) {
+            clients[j].worm.alive = false;
+            worm->bullets[i].active = false;
+            printf("Worm %d shot and killed worm %d!\n", clientIndex, j);
+          }
+        }
+      }
+    }
   }
 }
 
@@ -142,13 +300,11 @@ void handle_client(int client_socket) {
       if (num_clients < MAX_CLIENTS) {
         clients[num_clients].socket = client_socket;
 
-        // Calculate angle and spawn position for the new worm
         float angle = (2 * PI * num_clients) / MAX_CLIENTS;
         float startX = SCREEN_WIDTH / 2.0 + SPAWN_CIRCLE_RADIUS * cos(angle);
         float startY = SCREEN_HEIGHT / 2.0 + SPAWN_CIRCLE_RADIUS * sin(angle);
-        float spawnAngle = angle; // Face outward
-        // Add random offset to angle
-        spawnAngle += (rand() % 100) / 100.0 - 0.5;
+        float spawnAngle = angle;
+        spawnAngle += ((rand() % 200) / 100.0) - 1.0;
 
         initWorm(&clients[num_clients].worm, startX, startY, spawnAngle);
 
@@ -176,7 +332,9 @@ void handle_client(int client_socket) {
         }
       }
     } else if (strncmp(buffer, "LEFT", 4) == 0 ||
-               strncmp(buffer, "RIGHT", 5) == 0) {
+               strncmp(buffer, "RIGHT", 5) == 0 ||
+               strncmp(buffer, "SHOOT", 5) == 0 ||
+               strncmp(buffer, "BOOST", 5) == 0) {
       for (int i = 0; i < num_clients; i++) {
         if (clients[i].socket == client_socket) {
           pthread_mutex_lock(&clients[i].worm.input_mutex);
@@ -217,6 +375,14 @@ void game_loop() {
   while (1) {
     if (game_started && num_clients > 0) {
       pthread_mutex_lock(&clients_mutex);
+
+      // Spawn powerups
+      time_t current_time = time(NULL);
+      if (current_time - last_powerup_spawn >= POWERUP_SPAWN_INTERVAL) {
+        spawnPowerup();
+        last_powerup_spawn = current_time;
+      }
+
       for (int i = 0; i < num_clients; i++) {
         updateWorm(i);
       }
@@ -225,12 +391,37 @@ void game_loop() {
       int offset = 0;
       offset += snprintf(state + offset, sizeof(state) - offset, "STATE %d ",
                          num_clients);
+
+      // Add powerup information
+      offset += snprintf(state + offset, sizeof(state) - offset, "%d ",
+                         active_powerups);
+      for (int i = 0; i < active_powerups; i++) {
+        offset += snprintf(state + offset, sizeof(state) - offset,
+                           "%.2f %.2f %d ", powerups[i].position.x,
+                           powerups[i].position.y, powerups[i].type);
+      }
+
       for (int i = 0; i < num_clients; i++) {
         Worm *worm = &clients[i].worm;
         offset += snprintf(state + offset, sizeof(state) - offset,
-                           "%d %.2f %.2f %.2f %d ", worm->path_length,
-                           worm->position.x, worm->position.y, worm->angle,
-                           worm->alive ? 1 : 0);
+                           "%d %.2f %.2f %.2f %d %d %.2f %d ",
+                           worm->path_length, worm->position.x,
+                           worm->position.y, worm->angle, worm->alive ? 1 : 0,
+                           worm->bullets_left, worm->speed_boost_time_left,
+                           worm->speed_boost_active ? 1 : 0);
+
+        // Add bullet information
+        for (int j = 0; j < MAX_BULLETS; j++) {
+          if (worm->bullets[j].active) {
+            offset +=
+                snprintf(state + offset, sizeof(state) - offset,
+                         "%.2f %.2f %.2f ", worm->bullets[j].position.x,
+                         worm->bullets[j].position.y, worm->bullets[j].angle);
+          } else {
+            offset +=
+                snprintf(state + offset, sizeof(state) - offset, "0 0 0 ");
+          }
+        }
 
         // Add all path points
         for (int j = 0; j < worm->path_length; j++) {
@@ -254,6 +445,7 @@ void game_loop() {
 }
 
 int main() {
+  srand(time(NULL));
   int server_fd, new_socket;
   struct sockaddr_in address;
   int opt = 1;
