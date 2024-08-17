@@ -2,3 +2,8 @@ client
 server
 *.o
 *.sh
+compile_commands.json
+Wormio.app
+.DS_Store
+.cache
+Wormio.dmg

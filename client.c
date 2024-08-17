@@ -1,4 +1,4 @@
-#include "/opt/homebrew/Cellar/sdl2/2.30.6/include/SDL2/SDL.h"
+#include <SDL.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -15,7 +15,6 @@
 #define WORM_SPEED 2.0
 #define TURN_SPEED 0.1
 #define WORM_RADIUS 3
-#define MAX_PATH_LENGTH 150
 #define INPUT_BUFFER_SIZE 10
 #define MAX_BULLETS 3
 #define BULLET_RADIUS 5
@@ -40,7 +39,7 @@ typedef struct {
   bool up;
 } InputState;
 
-typedef enum { POWERUP_BULLETS, POWERUP_SPEED } PowerupType;
+typedef enum { POWERUP_BULLETS, POWERUP_SPEED, POWERUP_GHOST } PowerupType;
 
 typedef struct {
   Point position;
@@ -52,12 +51,14 @@ typedef struct {
   float angle;
   bool alive;
   SDL_Color color;
-  Point path[MAX_PATH_LENGTH];
+  Point *path; // Changed to a pointer
   int path_length;
+  int path_capacity; // Added to track allocated memory
   int bullets_left;
   Bullet bullets[MAX_BULLETS];
   float speed_boost_time_left;
   bool speed_boost_active;
+  bool is_ghost;
 } Worm;
 
 Worm worms[MAX_WORMS];
@@ -92,11 +93,9 @@ void drawCircle(SDL_Renderer *renderer, int x, int y, int radius) {
 }
 
 void drawThickLine(SDL_Renderer *renderer, int x1, int y1, int x2, int y2) {
-  // Check for wrapping by determining if the worm moved a large distance
   int deltaX = abs(x2 - x1);
   int deltaY = abs(y2 - y1);
   if (deltaX > SCREEN_WIDTH / 2 || deltaY > SCREEN_HEIGHT / 2) {
-    // Skip drawing the line if it wraps across the screen
     return;
   }
 
@@ -110,12 +109,13 @@ void drawThickLine(SDL_Renderer *renderer, int x1, int y1, int x2, int y2) {
 }
 
 void drawWorm(SDL_Renderer *renderer, Worm *worm) {
-  // Only draw the worm if it is alive
   if (!worm->alive) {
     return;
   }
+
+  Uint8 alpha = worm->is_ghost ? 128 : 255;
   SDL_SetRenderDrawColor(renderer, worm->color.r, worm->color.g, worm->color.b,
-                         worm->alive ? 255 : 64);
+                         alpha);
 
   for (int i = 1; i < worm->path_length; i++) {
     drawThickLine(renderer, (int)(worm->path[i - 1].x + 0.5),
@@ -123,7 +123,6 @@ void drawWorm(SDL_Renderer *renderer, Worm *worm) {
                   (int)(worm->path[i].x + 0.5), (int)(worm->path[i].y + 0.5));
   }
 
-  // Draw bullets
   SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255); // White bullets
   for (int i = 0; i < MAX_BULLETS; i++) {
     if (worm->bullets[i].active) {
@@ -132,7 +131,6 @@ void drawWorm(SDL_Renderer *renderer, Worm *worm) {
     }
   }
 
-  // Draw speed boost indicator
   if (worm->speed_boost_active) {
     SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255); // Yellow indicator
     drawCircle(renderer, (int)worm->position.x, (int)worm->position.y,
@@ -144,8 +142,10 @@ void drawPowerups(SDL_Renderer *renderer) {
   for (int i = 0; i < num_powerups; i++) {
     if (powerups[i].type == POWERUP_BULLETS) {
       SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255); // Red for bullets
-    } else {
+    } else if (powerups[i].type == POWERUP_SPEED) {
       SDL_SetRenderDrawColor(renderer, 0, 255, 0, 255); // Green for speed boost
+    } else if (powerups[i].type == POWERUP_GHOST) {
+      SDL_SetRenderDrawColor(renderer, 0, 0, 255, 255); // Blue for ghost
     }
     drawCircle(renderer, (int)powerups[i].position.x,
                (int)powerups[i].position.y, POWERUP_RADIUS);
@@ -170,7 +170,7 @@ void *send_input_thread(void *arg) {
 }
 
 void handle_server_messages() {
-  char buffer[16384];
+  char buffer[16384 * 16];
   int n;
 
   while ((n = recv(sock, buffer, sizeof(buffer) - 1, 0)) > 0) {
@@ -204,7 +204,6 @@ void handle_server_messages() {
 
       num_worms = count;
 
-      // Parse powerup information
       token = strtok(NULL, " ");
       if (token != NULL) {
         num_powerups = atoi(token);
@@ -274,6 +273,16 @@ void handle_server_messages() {
           break;
         bool speed_boost_active = atoi(token);
 
+        token = strtok(NULL, " ");
+        if (token == NULL)
+          break;
+        bool is_ghost = atoi(token);
+
+        token = strtok(NULL, " ");
+        if (token == NULL)
+          break;
+        int full_path_length = atoi(token);
+
         worms[i].position.x = x;
         worms[i].position.y = y;
         worms[i].angle = angle;
@@ -282,8 +291,15 @@ void handle_server_messages() {
         worms[i].bullets_left = bullets_left;
         worms[i].speed_boost_time_left = speed_boost_time_left;
         worms[i].speed_boost_active = speed_boost_active;
+        worms[i].is_ghost = is_ghost;
 
-        // Parse bullet information
+        if (full_path_length > worms[i].path_capacity) {
+          worms[i].path_capacity = full_path_length;
+          worms[i].path =
+              realloc(worms[i].path, worms[i].path_capacity * sizeof(Point));
+        }
+        worms[i].path_length = full_path_length;
+
         for (int j = 0; j < MAX_BULLETS; j++) {
           token = strtok(NULL, " ");
           if (token == NULL)
@@ -306,10 +322,6 @@ void handle_server_messages() {
           worms[i].bullets[j].active = (bullet_x != 0 || bullet_y != 0);
         }
 
-        worms[i].path_length =
-            (path_length > MAX_PATH_LENGTH) ? MAX_PATH_LENGTH : path_length;
-
-        // Parse path points
         for (int j = 0; j < worms[i].path_length; j++) {
           token = strtok(NULL, " ");
           if (token == NULL)
@@ -324,10 +336,11 @@ void handle_server_messages() {
 
         printf("Parsed worm %d: x=%.2f, y=%.2f, angle=%.2f, alive=%d, "
                "path_length=%d, bullets_left=%d, speed_boost_time_left=%.2f, "
-               "speed_boost_active=%d\n",
+               "speed_boost_active=%d, is_ghost=%d\n",
                i, worms[i].position.x, worms[i].position.y, worms[i].angle,
                worms[i].alive, worms[i].path_length, worms[i].bullets_left,
-               worms[i].speed_boost_time_left, worms[i].speed_boost_active);
+               worms[i].speed_boost_time_left, worms[i].speed_boost_active,
+               worms[i].is_ghost);
       }
     }
   }
@@ -400,6 +413,13 @@ int main(int argc, char *args[]) {
 
   send(sock, "JOIN", 4, 0);
 
+  // Initialize worms
+  for (int i = 0; i < MAX_WORMS; i++) {
+    worms[i].path_capacity = 100; // Start with space for 100 points
+    worms[i].path = malloc(worms[i].path_capacity * sizeof(Point));
+    worms[i].path_length = 0;
+  }
+
   pthread_t server_thread, input_thread;
   pthread_create(&server_thread, NULL,
                  (void *(*)(void *))handle_server_messages, NULL);
@@ -444,37 +464,16 @@ int main(int argc, char *args[]) {
       drawWorm(renderer, &worms[i]);
     }
 
-    // Draw HUD
-    if (player_id >= 0 && player_id < num_worms) {
-      Worm *player_worm = &worms[player_id];
-      char hud_text[100];
-      SDL_Color text_color = {255, 255, 255, 255};
-      SDL_Surface *text_surface;
-      SDL_Texture *text_texture;
-      SDL_Rect text_rect;
-
-      snprintf(hud_text, sizeof(hud_text), "Bullets: %d   Speed Boost: %.1f",
-               player_worm->bullets_left, player_worm->speed_boost_time_left);
-
-      // You'll need to set up a font for this part
-      // SDL_TTF_Font *font = TTF_OpenFont("path/to/font.ttf", 24);
-      // text_surface = TTF_RenderText_Solid(font, hud_text, text_color);
-      // text_texture = SDL_CreateTextureFromSurface(renderer, text_surface);
-      // text_rect.x = 10;
-      // text_rect.y = 10;
-      // text_rect.w = text_surface->w;
-      // text_rect.h = text_surface->h;
-      // SDL_RenderCopy(renderer, text_texture, NULL, &text_rect);
-      // SDL_FreeSurface(text_surface);
-      // SDL_DestroyTexture(text_texture);
-    }
-
     SDL_RenderPresent(renderer);
 
     SDL_Delay(1000 / CLIENT_TICK_RATE);
   }
 
   // Cleanup
+  for (int i = 0; i < MAX_WORMS; i++) {
+    free(worms[i].path);
+  }
+
   close(sock);
   SDL_DestroyTexture(canvas_texture);
   SDL_DestroyRenderer(renderer);

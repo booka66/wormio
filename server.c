@@ -1,3 +1,4 @@
+#include "SDL_stdinc.h"
 #include <arpa/inet.h>
 #include <math.h>
 #include <netinet/in.h>
@@ -17,7 +18,6 @@
 #define SPEED_BOOST_MULTIPLIER 3
 #define TURN_SPEED 0.1
 #define WORM_RADIUS 3
-#define MAX_PATH_LENGTH 150
 #define INPUT_BUFFER_SIZE 10
 #define PI 3.14159265
 #define MAX_BULLETS 3
@@ -43,7 +43,7 @@ typedef struct {
   bool active;
 } Bullet;
 
-typedef enum { POWERUP_BULLETS, POWERUP_SPEED } PowerupType;
+typedef enum { POWERUP_BULLETS, POWERUP_SPEED, POWERUP_GHOST } PowerupType;
 
 typedef struct {
   Point position;
@@ -63,14 +63,16 @@ typedef struct {
   bool alive;
   InputState input;
   pthread_mutex_t input_mutex;
-  Point path[MAX_PATH_LENGTH];
+  Point *path; // Change to a pointer
   int path_length;
+  int path_capacity; // Add this to keep track of allocated memory
   int bullets_left;
   Bullet bullets[MAX_BULLETS];
   time_t invincibility_end;
   float speed_boost_time_left;
   bool speed_boost_active;
-  float last_shot_time; // New variable to track the last shot time
+  float last_shot_time;
+  bool is_ghost;
 } Worm;
 
 typedef struct {
@@ -86,12 +88,28 @@ Powerup powerups[MAX_POWERUPS];
 int active_powerups = 0;
 time_t last_powerup_spawn = 0;
 
+void cleanupWorm(Worm *worm) {
+  free(worm->path);
+  pthread_mutex_destroy(&worm->input_mutex);
+}
+
+void cleanup_game() {
+  pthread_mutex_lock(&clients_mutex);
+  for (int i = 0; i < num_clients; i++) {
+    cleanupWorm(&clients[i].worm);
+  }
+  num_clients = 0;
+  pthread_mutex_unlock(&clients_mutex);
+}
+
 void initWorm(Worm *worm, float startX, float startY, float angle) {
   worm->position.x = startX;
   worm->position.y = startY;
   worm->angle = angle;
   worm->alive = true;
   pthread_mutex_init(&worm->input_mutex, NULL);
+  worm->path_capacity = 100; // Start with space for 100 points
+  worm->path = malloc(worm->path_capacity * sizeof(Point));
   worm->path[0] = (Point){startX, startY};
   worm->path_length = 1;
   worm->bullets_left = 0;
@@ -109,14 +127,11 @@ void initWorm(Worm *worm, float startX, float startY, float angle) {
 }
 
 void addPointToPath(Worm *worm, Point newPoint) {
-  if (worm->path_length < MAX_PATH_LENGTH) {
-    worm->path[worm->path_length++] = newPoint;
-  } else {
-    for (int i = 1; i < MAX_PATH_LENGTH; i++) {
-      worm->path[i - 1] = worm->path[i];
-    }
-    worm->path[MAX_PATH_LENGTH - 1] = newPoint;
+  if (worm->path_length >= worm->path_capacity) {
+    worm->path_capacity *= 2; // Double the capacity
+    worm->path = realloc(worm->path, worm->path_capacity * sizeof(Point));
   }
+  worm->path[worm->path_length++] = newPoint;
 }
 
 bool checkTailCollision(Worm *worm, Point newPosition) {
@@ -168,7 +183,14 @@ void spawnPowerup() {
     new_powerup.position.x = rand() % SCREEN_WIDTH;
     new_powerup.position.y = rand() % SCREEN_HEIGHT;
     new_powerup.active = true;
-    new_powerup.type = (rand() % 2 == 0) ? POWERUP_BULLETS : POWERUP_SPEED;
+    Uint8 new_type = rand() % 3;
+    if (new_type == POWERUP_BULLETS) {
+      new_powerup.type = POWERUP_BULLETS;
+    } else if (new_type == POWERUP_SPEED) {
+      new_powerup.type = POWERUP_SPEED;
+    } else {
+      new_powerup.type = POWERUP_GHOST;
+    }
     powerups[active_powerups++] = new_powerup;
     printf("Spawned powerup of type: %d at position (%.2f, %.2f)\n",
            new_powerup.type, new_powerup.position.x, new_powerup.position.y);
@@ -240,6 +262,9 @@ void updateWorm(int clientIndex) {
         }
       }
     }
+  } else {
+    worm->speed_boost_active = false;
+    worm->is_ghost = false;
   }
 
   Point newPosition = {worm->position.x + cos(worm->angle) * current_speed,
@@ -248,13 +273,16 @@ void updateWorm(int clientIndex) {
   newPosition.x = fmod(newPosition.x + SCREEN_WIDTH, SCREEN_WIDTH);
   newPosition.y = fmod(newPosition.y + SCREEN_HEIGHT, SCREEN_HEIGHT);
 
-  if (checkCollision(worm, newPosition)) {
+  if (!worm->is_ghost && checkCollision(worm, newPosition)) {
     worm->alive = false;
+
     if (checkTailCollision(worm, newPosition)) {
       printf("Worm %d collided with its own tail!\n", clientIndex);
     } else {
       printf("Worm %d collided and died!\n", clientIndex);
     }
+    worm->path_length = 0;
+    cleanupWorm(worm);
   } else {
     worm->position = newPosition;
     addPointToPath(worm, newPosition);
@@ -269,8 +297,14 @@ void updateWorm(int clientIndex) {
             worm->bullets_left = 3;
             worm->speed_boost_time_left = 0;
             worm->speed_boost_active = false;
+            worm->is_ghost = false;
           } else if (powerups[i].type == POWERUP_SPEED) {
             worm->speed_boost_time_left = SPEED_BOOST_DURATION;
+            worm->bullets_left = 0;
+            worm->is_ghost = false;
+          } else if (powerups[i].type == POWERUP_GHOST) {
+            worm->is_ghost = true;
+            worm->speed_boost_time_left = 0;
             worm->bullets_left = 0;
           }
           powerups[i].active = false;
@@ -359,6 +393,7 @@ void handle_client(int client_socket) {
   pthread_mutex_lock(&clients_mutex);
   for (int i = 0; i < num_clients; i++) {
     if (clients[i].socket == client_socket) {
+      cleanupWorm(&clients[i].worm);
       for (int j = i; j < num_clients - 1; j++) {
         clients[j] = clients[j + 1];
       }
@@ -387,7 +422,7 @@ void game_loop() {
         updateWorm(i);
       }
 
-      char state[16384];
+      char state[16384 * 16];
       int offset = 0;
       offset += snprintf(state + offset, sizeof(state) - offset, "STATE %d ",
                          num_clients);
@@ -403,12 +438,15 @@ void game_loop() {
 
       for (int i = 0; i < num_clients; i++) {
         Worm *worm = &clients[i].worm;
-        offset += snprintf(state + offset, sizeof(state) - offset,
-                           "%d %.2f %.2f %.2f %d %d %.2f %d ",
-                           worm->path_length, worm->position.x,
-                           worm->position.y, worm->angle, worm->alive ? 1 : 0,
-                           worm->bullets_left, worm->speed_boost_time_left,
-                           worm->speed_boost_active ? 1 : 0);
+        // In the main game loop, update how you send the state
+        offset +=
+            snprintf(state + offset, sizeof(state) - offset,
+                     "%d %.2f %.2f %.2f %d %d %.2f %d %d %d ",
+                     worm->path_length, worm->position.x, worm->position.y,
+                     worm->angle, worm->alive ? 1 : 0, worm->bullets_left,
+                     worm->speed_boost_time_left,
+                     worm->speed_boost_active ? 1 : 0, worm->is_ghost ? 1 : 0,
+                     worm->path_length); // Send the full path length
 
         // Add bullet information
         for (int j = 0; j < MAX_BULLETS; j++) {
@@ -444,12 +482,21 @@ void game_loop() {
   }
 }
 
+void handle_shutdown(int sig) {
+  printf("Shutting down server...\n");
+  cleanup_game();
+  exit(0);
+}
+
 int main() {
   srand(time(NULL));
   int server_fd, new_socket;
   struct sockaddr_in address;
   int opt = 1;
   int addrlen = sizeof(address);
+
+  // Handle ctrl+c
+  signal(SIGINT, handle_shutdown);
 
   if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
     perror("socket failed");
@@ -493,6 +540,6 @@ int main() {
     pthread_create(&client_thread, NULL, (void *(*)(void *))handle_client,
                    (void *)(intptr_t)new_socket);
   }
-
+  cleanup_game();
   return 0;
 }
