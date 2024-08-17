@@ -11,10 +11,10 @@
 #include <unistd.h>
 
 #define MAX_CLIENTS 6
-#define SCREEN_WIDTH (int)(1024 * 1.5)
-#define SCREEN_HEIGHT (int)(640 * 1.5)
+#define SCREEN_WIDTH (int)(1024 * 1.2)
+#define SCREEN_HEIGHT (int)(640 * 1.2)
 #define WORM_SPEED 2.0
-#define SPEED_BOOST_MULTIPLIER 2.0
+#define SPEED_BOOST_MULTIPLIER 3
 #define TURN_SPEED 0.1
 #define WORM_RADIUS 3
 #define MAX_PATH_LENGTH 150
@@ -22,7 +22,7 @@
 #define PI 3.14159265
 #define MAX_BULLETS 3
 #define BULLET_SPEED 12
-#define POWERUP_SPAWN_INTERVAL 10
+#define POWERUP_SPAWN_INTERVAL 5
 #define MAX_POWERUPS 3
 #define SPAWN_CIRCLE_RADIUS 50
 #define POWERUP_RADIUS 10
@@ -30,6 +30,7 @@
 #define TAIL_COLLISION_THRESHOLD 10
 #define INVINCIIBILITY_TIME 2
 #define SPEED_BOOST_DURATION 3.0
+#define BULLET_COOLDOWN 0.003
 
 typedef struct {
   float x;
@@ -51,11 +52,16 @@ typedef struct {
 } Powerup;
 
 typedef struct {
+  bool left;
+  bool right;
+  bool up;
+} InputState;
+
+typedef struct {
   Point position;
   float angle;
   bool alive;
-  char input_buffer[INPUT_BUFFER_SIZE][10];
-  int input_buffer_count;
+  InputState input;
   pthread_mutex_t input_mutex;
   Point path[MAX_PATH_LENGTH];
   int path_length;
@@ -64,6 +70,7 @@ typedef struct {
   time_t invincibility_end;
   float speed_boost_time_left;
   bool speed_boost_active;
+  float last_shot_time; // New variable to track the last shot time
 } Worm;
 
 typedef struct {
@@ -84,7 +91,6 @@ void initWorm(Worm *worm, float startX, float startY, float angle) {
   worm->position.y = startY;
   worm->angle = angle;
   worm->alive = true;
-  worm->input_buffer_count = 0;
   pthread_mutex_init(&worm->input_mutex, NULL);
   worm->path[0] = (Point){startX, startY};
   worm->path_length = 1;
@@ -95,6 +101,11 @@ void initWorm(Worm *worm, float startX, float startY, float angle) {
   worm->invincibility_end = time(NULL) + INVINCIIBILITY_TIME;
   worm->speed_boost_time_left = 0;
   worm->speed_boost_active = false;
+  worm->input.left = false;
+  worm->input.right = false;
+  worm->input.up = false;
+  worm->last_shot_time = 0;
+  memset(&worm->input, 0, sizeof(InputState));
 }
 
 void addPointToPath(Worm *worm, Point newPoint) {
@@ -194,39 +205,40 @@ void updateWorm(int clientIndex) {
     return;
 
   pthread_mutex_lock(&worm->input_mutex);
-  bool boost_pressed = false;
-  if (worm->input_buffer_count > 0) {
-    if (strcmp(worm->input_buffer[0], "LEFT") == 0) {
-      worm->angle -= TURN_SPEED;
-    } else if (strcmp(worm->input_buffer[0], "RIGHT") == 0) {
-      worm->angle += TURN_SPEED;
-    } else if (strcmp(worm->input_buffer[0], "SHOOT") == 0 &&
-               worm->bullets_left > 0) {
+  InputState input = worm->input;
+  pthread_mutex_unlock(&worm->input_mutex);
+
+  if (input.left) {
+    worm->angle -= TURN_SPEED;
+  }
+  if (input.right) {
+    worm->angle += TURN_SPEED;
+  }
+
+  float current_time = (float)clock() / CLOCKS_PER_SEC;
+  float current_speed = WORM_SPEED;
+  if (input.up) {
+    if (worm->speed_boost_time_left > 0) {
+      current_speed *= SPEED_BOOST_MULTIPLIER;
+      worm->speed_boost_time_left -= 1.0 / 60.0; // Assuming 60 FPS
+      if (worm->speed_boost_time_left <= 0) {
+        worm->speed_boost_time_left = 0;
+      }
+    } else if (worm->bullets_left > 0 &&
+               (current_time - worm->last_shot_time) >= BULLET_COOLDOWN) {
+      // Shoot a bullet
       for (int i = 0; i < MAX_BULLETS; i++) {
         if (!worm->bullets[i].active) {
           worm->bullets[i].position = worm->position;
           worm->bullets[i].angle = worm->angle;
           worm->bullets[i].active = true;
           worm->bullets_left--;
+          worm->last_shot_time = current_time;
+          printf("Bullet fired by worm %d. Bullets left: %d\n", clientIndex,
+                 worm->bullets_left);
           break;
         }
       }
-    } else if (strcmp(worm->input_buffer[0], "BOOST") == 0) {
-      boost_pressed = true;
-    }
-    for (int i = 1; i < worm->input_buffer_count; i++) {
-      strcpy(worm->input_buffer[i - 1], worm->input_buffer[i]);
-    }
-    worm->input_buffer_count--;
-  }
-  pthread_mutex_unlock(&worm->input_mutex);
-
-  float current_speed = WORM_SPEED;
-  if (boost_pressed && worm->speed_boost_time_left > 0) {
-    current_speed *= SPEED_BOOST_MULTIPLIER;
-    worm->speed_boost_time_left -= 1.0 / 60.0; // Assuming 60 FPS
-    if (worm->speed_boost_time_left <= 0) {
-      worm->speed_boost_time_left = 0;
     }
   }
 
@@ -331,24 +343,12 @@ void handle_client(int client_socket) {
           send(clients[i].socket, msg, strlen(msg), 0);
         }
       }
-    } else if (strncmp(buffer, "LEFT", 4) == 0 ||
-               strncmp(buffer, "RIGHT", 5) == 0 ||
-               strncmp(buffer, "SHOOT", 5) == 0 ||
-               strncmp(buffer, "BOOST", 5) == 0) {
+    } else if (strncmp(buffer, "INPUT", 5) == 0) {
       for (int i = 0; i < num_clients; i++) {
         if (clients[i].socket == client_socket) {
           pthread_mutex_lock(&clients[i].worm.input_mutex);
-          if (clients[i].worm.input_buffer_count < INPUT_BUFFER_SIZE) {
-            strncpy(clients[i]
-                        .worm.input_buffer[clients[i].worm.input_buffer_count],
-                    buffer, sizeof(clients[i].worm.input_buffer[0]) - 1);
-            clients[i]
-                .worm
-                .input_buffer[clients[i].worm.input_buffer_count]
-                             [sizeof(clients[i].worm.input_buffer[0]) - 1] =
-                '\0';
-            clients[i].worm.input_buffer_count++;
-          }
+          sscanf(buffer, "INPUT %d %d %d", &clients[i].worm.input.left,
+                 &clients[i].worm.input.right, &clients[i].worm.input.up);
           pthread_mutex_unlock(&clients[i].worm.input_mutex);
           break;
         }

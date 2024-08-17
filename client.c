@@ -10,8 +10,8 @@
 #include <unistd.h>
 
 #define MAX_WORMS 6
-#define SCREEN_WIDTH (int)(1024 * 1.5)
-#define SCREEN_HEIGHT (int)(640 * 1.5)
+#define SCREEN_WIDTH (int)(1024 * 1.2)
+#define SCREEN_HEIGHT (int)(640 * 1.2)
 #define WORM_SPEED 2.0
 #define TURN_SPEED 0.1
 #define WORM_RADIUS 3
@@ -33,6 +33,12 @@ typedef struct {
   float angle;
   bool active;
 } Bullet;
+
+typedef struct {
+  bool left;
+  bool right;
+  bool up;
+} InputState;
 
 typedef enum { POWERUP_BULLETS, POWERUP_SPEED } PowerupType;
 
@@ -65,8 +71,7 @@ int num_powerups = 0;
 
 SDL_Texture *canvas_texture = NULL;
 
-char input_buffer[INPUT_BUFFER_SIZE][10];
-int input_buffer_count = 0;
+InputState current_input = {false, false, false};
 pthread_mutex_t input_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 SDL_Color colors[MAX_WORMS] = {
@@ -147,28 +152,18 @@ void drawPowerups(SDL_Renderer *renderer) {
   }
 }
 
-void send_input(const char *input) {
+void send_input() {
   pthread_mutex_lock(&input_mutex);
-  if (input_buffer_count < INPUT_BUFFER_SIZE) {
-    strncpy(input_buffer[input_buffer_count], input,
-            sizeof(input_buffer[0]) - 1);
-    input_buffer[input_buffer_count][sizeof(input_buffer[0]) - 1] = '\0';
-    input_buffer_count++;
-  }
+  char input_buffer[50];
+  snprintf(input_buffer, sizeof(input_buffer), "INPUT %d %d %d",
+           current_input.left, current_input.right, current_input.up);
+  send(sock, input_buffer, strlen(input_buffer), 0);
   pthread_mutex_unlock(&input_mutex);
 }
 
 void *send_input_thread(void *arg) {
   while (1) {
-    pthread_mutex_lock(&input_mutex);
-    if (input_buffer_count > 0) {
-      send(sock, input_buffer[0], strlen(input_buffer[0]), 0);
-      for (int i = 1; i < input_buffer_count; i++) {
-        strcpy(input_buffer[i - 1], input_buffer[i]);
-      }
-      input_buffer_count--;
-    }
-    pthread_mutex_unlock(&input_mutex);
+    send_input();
     usleep(1000000 / CLIENT_TICK_RATE); // Send at CLIENT_TICK_RATE Hz
   }
   return NULL;
@@ -425,9 +420,7 @@ int main(int argc, char *args[]) {
         switch (event.key.keysym.sym) {
         case SDLK_SPACE:
           if (!game_started) {
-            send_input("START");
-          } else {
-            send_input("SHOOT");
+            send(sock, "START", 5, 0);
           }
           break;
         }
@@ -435,18 +428,12 @@ int main(int argc, char *args[]) {
     }
 
     // Continuous input handling
-    const char *input = NULL;
-    if (keystate[SDL_SCANCODE_LEFT]) {
-      input = "LEFT";
-    } else if (keystate[SDL_SCANCODE_RIGHT]) {
-      input = "RIGHT";
-    } else if (keystate[SDL_SCANCODE_UP]) {
-      input = "BOOST";
-    }
-
-    if (input) {
-      send_input(input);
-    }
+    const Uint8 *keystate = SDL_GetKeyboardState(NULL);
+    pthread_mutex_lock(&input_mutex);
+    current_input.left = keystate[SDL_SCANCODE_LEFT];
+    current_input.right = keystate[SDL_SCANCODE_RIGHT];
+    current_input.up = keystate[SDL_SCANCODE_UP];
+    pthread_mutex_unlock(&input_mutex);
 
     SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255); // Dark gray background
     SDL_RenderClear(renderer);
