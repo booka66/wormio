@@ -542,7 +542,7 @@ int main(int argc, char *args[]) {
     return 1;
   }
 
-  font = TTF_OpenFont("./font.ttf", 24);
+  font = TTF_OpenFont("./cmunui.ttf", 24);
   if (font == NULL) {
     printf("Failed to load font! SDL_ttf Error: %s\n", TTF_GetError());
     return 1;
