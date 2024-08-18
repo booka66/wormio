@@ -1,5 +1,7 @@
 #include <SDL.h>
+#include <SDL_ttf.h>
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -21,6 +23,10 @@
 #define MAX_POWERUPS 3
 #define POWERUP_RADIUS 10
 #define CLIENT_TICK_RATE 60 // Hz
+
+#define MAX_SERVERS 10
+#define DISCOVERY_PORT 8081
+#define SERVER_RESPONSE_TIMEOUT 2
 
 typedef struct {
   float x;
@@ -51,9 +57,9 @@ typedef struct {
   float angle;
   bool alive;
   SDL_Color color;
-  Point *path; // Changed to a pointer
+  Point *path;
   int path_length;
-  int path_capacity; // Added to track allocated memory
+  int path_capacity;
   int bullets_left;
   Bullet bullets[MAX_BULLETS];
   float speed_boost_time_left;
@@ -79,6 +85,153 @@ SDL_Color colors[MAX_WORMS] = {
     {239, 71, 111, 255}, {247, 140, 107, 255}, {255, 209, 102, 255},
     {6, 214, 160, 255},  {17, 138, 178, 255},  {83, 141, 34, 255},
 };
+
+typedef struct {
+  char ip[INET_ADDRSTRLEN];
+  int port;
+  char name[64];
+} ServerInfo;
+
+ServerInfo servers[MAX_SERVERS];
+int num_servers = 0;
+
+TTF_Font *font = NULL;
+
+void render_text(SDL_Renderer *renderer, const char *text, int x, int y,
+                 SDL_Color color) {
+  SDL_Surface *surface = TTF_RenderText_Solid(font, text, color);
+  if (surface == NULL) {
+    printf("Unable to render text surface! SDL_ttf Error: %s\n",
+           TTF_GetError());
+    return;
+  }
+
+  SDL_Texture *texture = SDL_CreateTextureFromSurface(renderer, surface);
+  if (texture == NULL) {
+    printf("Unable to create texture from rendered text! SDL Error: %s\n",
+           SDL_GetError());
+    SDL_FreeSurface(surface);
+    return;
+  }
+
+  SDL_Rect dest = {x, y, surface->w, surface->h};
+  SDL_RenderCopy(renderer, texture, NULL, &dest);
+
+  SDL_FreeSurface(surface);
+  SDL_DestroyTexture(texture);
+}
+
+void discover_servers() {
+  int sock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sock < 0) {
+    perror("Socket creation failed");
+    return;
+  }
+
+  int broadcast = 1;
+  if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast,
+                 sizeof(broadcast)) < 0) {
+    perror("Set socket option failed");
+    close(sock);
+    return;
+  }
+
+  struct sockaddr_in broadcast_addr;
+  memset(&broadcast_addr, 0, sizeof(broadcast_addr));
+  broadcast_addr.sin_family = AF_INET;
+  broadcast_addr.sin_port = htons(DISCOVERY_PORT);
+  broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
+
+  char discovery_message[] = "DISCOVER_BATTLE_NOODLES_SERVER";
+  if (sendto(sock, discovery_message, strlen(discovery_message), 0,
+             (struct sockaddr *)&broadcast_addr, sizeof(broadcast_addr)) < 0) {
+    perror("Broadcast failed");
+    close(sock);
+    return;
+  }
+
+  struct timeval tv;
+  tv.tv_sec = SERVER_RESPONSE_TIMEOUT;
+  tv.tv_usec = 0;
+  if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+    perror("Set socket timeout failed");
+    close(sock);
+    return;
+  }
+
+  char buffer[256];
+  struct sockaddr_in server_addr;
+  socklen_t addr_len = sizeof(server_addr);
+
+  while (num_servers < MAX_SERVERS) {
+    int received = recvfrom(sock, buffer, sizeof(buffer) - 1, 0,
+                            (struct sockaddr *)&server_addr, &addr_len);
+    if (received < 0) {
+      if (errno == EWOULDBLOCK || errno == EAGAIN) {
+        // Timeout reached, no more servers responding
+        break;
+      }
+      perror("Receive failed");
+      continue;
+    }
+
+    buffer[received] = '\0';
+    char server_name[64];
+    int server_port;
+    if (sscanf(buffer, "BATTLE_NOODLES_SERVER %63s %d", server_name,
+               &server_port) == 2) {
+      strcpy(servers[num_servers].ip, inet_ntoa(server_addr.sin_addr));
+      servers[num_servers].port = server_port;
+      strcpy(servers[num_servers].name, server_name);
+      num_servers++;
+    }
+  }
+
+  close(sock);
+}
+
+int choose_server(SDL_Renderer *renderer) {
+  SDL_Event event;
+  int selected = 0;
+  SDL_Color text_color = {255, 255, 255, 255};
+  SDL_Color highlight_color = {255, 255, 0, 255};
+
+  while (1) {
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_RenderClear(renderer);
+
+    render_text(renderer, "Select a server:", 50, 20, text_color);
+
+    for (int i = 0; i < num_servers; i++) {
+      SDL_Color color = (i == selected) ? highlight_color : text_color;
+      char server_info[128];
+      snprintf(server_info, sizeof(server_info), "%d. %s (%s:%d)", i + 1,
+               servers[i].name, servers[i].ip, servers[i].port);
+      render_text(renderer, server_info, 50, 50 + i * 30, color);
+    }
+
+    SDL_RenderPresent(renderer);
+
+    if (SDL_WaitEvent(&event)) {
+      if (event.type == SDL_QUIT) {
+        return -1;
+      } else if (event.type == SDL_KEYDOWN) {
+        switch (event.key.keysym.sym) {
+        case SDLK_UP:
+          selected = (selected - 1 + num_servers) % num_servers;
+          break;
+        case SDLK_DOWN:
+          selected = (selected + 1) % num_servers;
+          break;
+        case SDLK_RETURN:
+          return selected;
+        case SDLK_ESCAPE:
+          return -1;
+        }
+      }
+    }
+  }
+}
 
 void drawCircle(SDL_Renderer *renderer, int x, int y, int radius) {
   for (int w = 0; w < radius * 2; w++) {
@@ -358,10 +511,20 @@ int main(int argc, char *args[]) {
   SDL_Event event;
   bool quit = false;
 
-  struct sockaddr_in serv_addr;
+  discover_servers();
+
+  if (num_servers == 0) {
+    printf("No servers found. Exiting.\n");
+    return -1;
+  }
 
   if (SDL_Init(SDL_INIT_VIDEO) < 0) {
     printf("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
+    return 1;
+  }
+
+  if (TTF_Init() == -1) {
+    printf("SDL_ttf could not initialize! SDL_ttf Error: %s\n", TTF_GetError());
     return 1;
   }
 
@@ -379,6 +542,43 @@ int main(int argc, char *args[]) {
     return 1;
   }
 
+  font = TTF_OpenFont("./font.ttf", 24);
+  if (font == NULL) {
+    printf("Failed to load font! SDL_ttf Error: %s\n", TTF_GetError());
+    return 1;
+  }
+
+  int selected_server = choose_server(renderer);
+  if (selected_server == -1) {
+    printf("No server selected. Exiting.\n");
+    TTF_CloseFont(font);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    TTF_Quit();
+    SDL_Quit();
+    return -1;
+  }
+
+  if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    printf("\n Socket creation error \n");
+    return -1;
+  }
+
+  struct sockaddr_in serv_addr;
+  serv_addr.sin_family = AF_INET;
+  serv_addr.sin_port = htons(servers[selected_server].port);
+
+  if (inet_pton(AF_INET, servers[selected_server].ip, &serv_addr.sin_addr) <=
+      0) {
+    printf("\nInvalid address/ Address not supported \n");
+    return -1;
+  }
+
+  if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+    printf("\nConnection Failed \n");
+    return -1;
+  }
+
   canvas_texture =
       SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
                         SDL_TEXTUREACCESS_TARGET, SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -392,24 +592,6 @@ int main(int argc, char *args[]) {
   SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
   SDL_RenderClear(renderer);
   SDL_SetRenderTarget(renderer, NULL);
-
-  if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-    printf("\n Socket creation error \n");
-    return -1;
-  }
-
-  serv_addr.sin_family = AF_INET;
-  serv_addr.sin_port = htons(8080);
-
-  if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
-    printf("\nInvalid address/ Address not supported \n");
-    return -1;
-  }
-
-  if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-    printf("\nConnection Failed \n");
-    return -1;
-  }
 
   send(sock, "JOIN", 4, 0);
 
@@ -476,8 +658,10 @@ int main(int argc, char *args[]) {
 
   close(sock);
   SDL_DestroyTexture(canvas_texture);
+  TTF_CloseFont(font);
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);
+  TTF_Quit();
   SDL_Quit();
 
   return 0;

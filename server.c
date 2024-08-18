@@ -32,6 +32,10 @@
 #define SPEED_BOOST_DURATION 3.0
 #define BULLET_COOLDOWN 0.003
 
+#define DISCOVERY_PORT 8081
+#define GAME_PORT 8080
+#define SERVER_NAME "BattleNoodles_Server"
+
 typedef struct {
   float x;
   float y;
@@ -488,6 +492,52 @@ void handle_shutdown(int sig) {
   exit(0);
 }
 
+void *handle_discovery(void *arg) {
+  int discovery_socket = socket(AF_INET, SOCK_DGRAM, 0);
+  if (discovery_socket < 0) {
+    perror("Discovery socket creation failed");
+    return NULL;
+  }
+
+  struct sockaddr_in discovery_addr;
+  memset(&discovery_addr, 0, sizeof(discovery_addr));
+  discovery_addr.sin_family = AF_INET;
+  discovery_addr.sin_addr.s_addr = INADDR_ANY;
+  discovery_addr.sin_port = htons(DISCOVERY_PORT);
+
+  if (bind(discovery_socket, (struct sockaddr *)&discovery_addr,
+           sizeof(discovery_addr)) < 0) {
+    perror("Bind failed");
+    close(discovery_socket);
+    return NULL;
+  }
+
+  char buffer[256];
+  struct sockaddr_in client_addr;
+  socklen_t addr_len = sizeof(client_addr);
+
+  while (1) {
+    int received = recvfrom(discovery_socket, buffer, sizeof(buffer) - 1, 0,
+                            (struct sockaddr *)&client_addr, &addr_len);
+    if (received < 0) {
+      perror("Receive failed");
+      continue;
+    }
+
+    buffer[received] = '\0';
+    if (strcmp(buffer, "DISCOVER_BATTLE_NOODLES_SERVER") == 0) {
+      char response[256];
+      snprintf(response, sizeof(response), "BATTLE_NOODLES_SERVER %s %d",
+               SERVER_NAME, GAME_PORT);
+      sendto(discovery_socket, response, strlen(response), 0,
+             (struct sockaddr *)&client_addr, addr_len);
+    }
+  }
+
+  close(discovery_socket);
+  return NULL;
+}
+
 int main() {
   srand(time(NULL));
   int server_fd, new_socket;
@@ -521,6 +571,9 @@ int main() {
     perror("listen");
     exit(EXIT_FAILURE);
   }
+
+  pthread_t discovery_thread;
+  pthread_create(&discovery_thread, NULL, handle_discovery, NULL);
 
   printf("Server listening on port 8080\n");
 
