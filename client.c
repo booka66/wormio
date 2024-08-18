@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +39,12 @@ typedef struct {
   float angle;
   bool active;
 } Bullet;
+
+typedef struct {
+  SDL_Rect rect;
+  char *text;
+  bool hovered;
+} Button;
 
 typedef struct {
   bool left;
@@ -96,6 +103,110 @@ ServerInfo servers[MAX_SERVERS];
 int num_servers = 0;
 
 TTF_Font *font = NULL;
+
+Button host_button, join_button;
+bool on_home_screen = true;
+
+void init_buttons() {
+  int button_width = 200;
+  int button_height = 50;
+  int spacing = 20;
+
+  host_button.rect.w = button_width;
+  host_button.rect.h = button_height;
+  host_button.rect.x = (SCREEN_WIDTH - button_width) / 2;
+  host_button.rect.y = (SCREEN_HEIGHT - 2 * button_height - spacing) / 2;
+  host_button.text = "Host Game";
+  host_button.hovered = false;
+
+  join_button.rect.w = button_width;
+  join_button.rect.h = button_height;
+  join_button.rect.x = (SCREEN_WIDTH - button_width) / 2;
+  join_button.rect.y = host_button.rect.y + button_height + spacing;
+  join_button.text = "Join Game";
+  join_button.hovered = false;
+}
+
+void draw_button(SDL_Renderer *renderer, Button *button) {
+  // Draw button background
+  SDL_Color bg_color = button->hovered ? (SDL_Color){120, 120, 120, 255}
+                                       : (SDL_Color){80, 80, 80, 255};
+  SDL_SetRenderDrawColor(renderer, bg_color.r, bg_color.g, bg_color.b,
+                         bg_color.a);
+  SDL_RenderFillRect(renderer, &button->rect);
+
+  // Draw button border
+  SDL_SetRenderDrawColor(renderer, 200, 200, 200, 255);
+  SDL_RenderDrawRect(renderer, &button->rect);
+
+  // Render text
+  SDL_Color text_color = {255, 255, 255, 255}; // White text
+  SDL_Surface *surface = TTF_RenderText_Blended(font, button->text, text_color);
+  if (surface == NULL) {
+    printf("Unable to render text surface! SDL_ttf Error: %s\n",
+           TTF_GetError());
+    return;
+  }
+
+  SDL_Texture *texture = SDL_CreateTextureFromSurface(renderer, surface);
+  if (texture == NULL) {
+    printf("Unable to create texture from rendered text! SDL Error: %s\n",
+           SDL_GetError());
+    SDL_FreeSurface(surface);
+    return;
+  }
+
+  SDL_Rect text_rect = {button->rect.x + (button->rect.w - surface->w) / 2,
+                        button->rect.y + (button->rect.h - surface->h) / 2,
+                        surface->w, surface->h};
+
+  SDL_RenderCopy(renderer, texture, NULL, &text_rect);
+
+  SDL_FreeSurface(surface);
+  SDL_DestroyTexture(texture);
+}
+
+void draw_home_screen(SDL_Renderer *renderer) {
+  // Clear the screen with a dark background
+  SDL_SetRenderDrawColor(renderer, 40, 40, 40, 255);
+  SDL_RenderClear(renderer);
+
+  // Draw title
+  SDL_Color title_color = {255, 255, 255, 255}; // White color
+  SDL_Surface *title_surface =
+      TTF_RenderText_Blended(font, "Battle Noodles", title_color);
+  if (title_surface == NULL) {
+    printf("Unable to render title surface! SDL_ttf Error: %s\n",
+           TTF_GetError());
+    return;
+  }
+
+  SDL_Texture *title_texture =
+      SDL_CreateTextureFromSurface(renderer, title_surface);
+  if (title_texture == NULL) {
+    printf("Unable to create texture from rendered title! SDL Error: %s\n",
+           SDL_GetError());
+    SDL_FreeSurface(title_surface);
+    return;
+  }
+
+  SDL_Rect title_rect = {(SCREEN_WIDTH - title_surface->w) / 2, 50,
+                         title_surface->w, title_surface->h};
+
+  SDL_RenderCopy(renderer, title_texture, NULL, &title_rect);
+
+  SDL_FreeSurface(title_surface);
+  SDL_DestroyTexture(title_texture);
+
+  // Draw buttons
+  draw_button(renderer, &host_button);
+  draw_button(renderer, &join_button);
+}
+
+bool is_point_in_rect(int x, int y, SDL_Rect *rect) {
+  return (x >= rect->x && x <= rect->x + rect->w && y >= rect->y &&
+          y <= rect->y + rect->h);
+}
 
 void render_text(SDL_Renderer *renderer, const char *text, int x, int y,
                  SDL_Color color) {
@@ -511,13 +622,6 @@ int main(int argc, char *args[]) {
   SDL_Event event;
   bool quit = false;
 
-  discover_servers();
-
-  if (num_servers == 0) {
-    printf("No servers found. Exiting.\n");
-    return -1;
-  }
-
   if (SDL_Init(SDL_INIT_VIDEO) < 0) {
     printf("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
     return 1;
@@ -548,116 +652,217 @@ int main(int argc, char *args[]) {
     return 1;
   }
 
-  int selected_server = choose_server(renderer);
-  if (selected_server == -1) {
-    printf("No server selected. Exiting.\n");
-    TTF_CloseFont(font);
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
-    TTF_Quit();
-    SDL_Quit();
-    return -1;
-  }
+  init_buttons();
 
-  if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-    printf("\n Socket creation error \n");
-    return -1;
-  }
-
-  struct sockaddr_in serv_addr;
-  serv_addr.sin_family = AF_INET;
-  serv_addr.sin_port = htons(servers[selected_server].port);
-
-  if (inet_pton(AF_INET, servers[selected_server].ip, &serv_addr.sin_addr) <=
-      0) {
-    printf("\nInvalid address/ Address not supported \n");
-    return -1;
-  }
-
-  if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-    printf("\nConnection Failed \n");
-    return -1;
-  }
-
-  canvas_texture =
-      SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
-                        SDL_TEXTUREACCESS_TARGET, SCREEN_WIDTH, SCREEN_HEIGHT);
-  if (canvas_texture == NULL) {
-    printf("Canvas texture could not be created! SDL_Error: %s\n",
-           SDL_GetError());
-    return 1;
-  }
-
-  SDL_SetRenderTarget(renderer, canvas_texture);
-  SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-  SDL_RenderClear(renderer);
-  SDL_SetRenderTarget(renderer, NULL);
-
-  send(sock, "JOIN", 4, 0);
-
-  // Initialize worms
-  for (int i = 0; i < MAX_WORMS; i++) {
-    worms[i].path_capacity = 100; // Start with space for 100 points
-    worms[i].path = malloc(worms[i].path_capacity * sizeof(Point));
-    worms[i].path_length = 0;
-  }
-
-  pthread_t server_thread, input_thread;
-  pthread_create(&server_thread, NULL,
-                 (void *(*)(void *))handle_server_messages, NULL);
-  pthread_create(&input_thread, NULL, send_input_thread, NULL);
-
-  Uint32 lastTime = SDL_GetTicks();
-  const Uint8 *keystate = SDL_GetKeyboardState(NULL);
+  bool on_main_screen = true;
+  bool hosting = false;
+  pid_t server_pid = -1;
+  bool main_screen_needs_update = true;
 
   while (!quit) {
-    Uint32 currentTime = SDL_GetTicks();
-    float deltaTime = (currentTime - lastTime) / 1000.0f;
-    lastTime = currentTime;
-
     while (SDL_PollEvent(&event) != 0) {
       if (event.type == SDL_QUIT) {
         quit = true;
-      } else if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
-        switch (event.key.keysym.sym) {
-        case SDLK_SPACE:
-          if (!game_started) {
-            send(sock, "START", 5, 0);
+      } else if (event.type == SDL_MOUSEBUTTONDOWN) {
+        int x, y;
+        SDL_GetMouseState(&x, &y);
+        if (on_main_screen) {
+          if (is_point_in_rect(x, y, &host_button.rect)) {
+            // Host Game button clicked
+            server_pid = fork();
+            if (server_pid == 0) {
+              // Child process: execute the server
+              execl("./server", "./server", NULL);
+              exit(1); // This line is reached only if execl fails
+            } else if (server_pid > 0) {
+              // Parent process: connect to the local server
+              hosting = true;
+              on_main_screen = false;
+              sleep(1); // Wait for the server to start
+
+              // Connect to localhost
+              if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+                printf("\n Socket creation error \n");
+                return -1;
+              }
+
+              struct sockaddr_in serv_addr;
+              serv_addr.sin_family = AF_INET;
+              serv_addr.sin_port =
+                  htons(8080); // Assuming the server uses port 8080
+
+              if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
+                printf("\nInvalid address/ Address not supported \n");
+                return -1;
+              }
+
+              if (connect(sock, (struct sockaddr *)&serv_addr,
+                          sizeof(serv_addr)) < 0) {
+                printf("\nConnection Failed \n");
+                return -1;
+              }
+            } else {
+              perror("Failed to fork");
+            }
+          } else if (is_point_in_rect(x, y, &join_button.rect)) {
+            // Join Game button clicked
+            on_main_screen = false;
+            main_screen_needs_update = true;
           }
-          break;
+        }
+      } else if (event.type == SDL_MOUSEMOTION) {
+        // Check if mouse is over buttons and update if needed
+        int x, y;
+        SDL_GetMouseState(&x, &y);
+        bool host_hovered = is_point_in_rect(x, y, &host_button.rect);
+        bool join_hovered = is_point_in_rect(x, y, &join_button.rect);
+        if (host_hovered != host_button.hovered ||
+            join_hovered != join_button.hovered) {
+          host_button.hovered = host_hovered;
+          join_button.hovered = join_hovered;
+          main_screen_needs_update = true;
         }
       }
     }
 
-    // Continuous input handling
-    const Uint8 *keystate = SDL_GetKeyboardState(NULL);
-    pthread_mutex_lock(&input_mutex);
-    current_input.left = keystate[SDL_SCANCODE_LEFT];
-    current_input.right = keystate[SDL_SCANCODE_RIGHT];
-    current_input.up = keystate[SDL_SCANCODE_UP];
-    pthread_mutex_unlock(&input_mutex);
+    if (on_main_screen) {
+      if (main_screen_needs_update) {
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderClear(renderer);
+        draw_home_screen(renderer);
+        SDL_RenderPresent(renderer);
+        main_screen_needs_update = false;
+      }
+    } else if (!hosting) {
+      // Server selection screen (only for joining, not hosting)
+      SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+      SDL_RenderClear(renderer);
 
-    SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255); // Dark gray background
-    SDL_RenderClear(renderer);
+      static Uint32 last_discovery_time = 0;
+      Uint32 current_time = SDL_GetTicks();
 
-    drawPowerups(renderer);
+      if (current_time - last_discovery_time >= 1000) { // Every second
+        discover_servers();
+        last_discovery_time = current_time;
+      }
 
-    for (int i = 0; i < num_worms; i++) {
-      drawWorm(renderer, &worms[i]);
+      int selected_server = choose_server(renderer);
+      if (selected_server != -1) {
+        if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+          printf("\n Socket creation error \n");
+          return -1;
+        }
+
+        struct sockaddr_in serv_addr;
+        serv_addr.sin_family = AF_INET;
+        serv_addr.sin_port = htons(servers[selected_server].port);
+
+        if (inet_pton(AF_INET, servers[selected_server].ip,
+                      &serv_addr.sin_addr) <= 0) {
+          printf("\nInvalid address/ Address not supported \n");
+          return -1;
+        }
+
+        if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) <
+            0) {
+          printf("\nConnection Failed \n");
+          return -1;
+        }
+      }
     }
 
-    SDL_RenderPresent(renderer);
+    // Game setup and main loop (for both hosting and joining)
+    if (!on_main_screen) {
+      canvas_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+                                         SDL_TEXTUREACCESS_TARGET, SCREEN_WIDTH,
+                                         SCREEN_HEIGHT);
+      if (canvas_texture == NULL) {
+        printf("Canvas texture could not be created! SDL_Error: %s\n",
+               SDL_GetError());
+        return 1;
+      }
 
-    SDL_Delay(1000 / CLIENT_TICK_RATE);
+      SDL_SetRenderTarget(renderer, canvas_texture);
+      SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+      SDL_RenderClear(renderer);
+      SDL_SetRenderTarget(renderer, NULL);
+
+      send(sock, "JOIN", 4, 0);
+
+      // Initialize worms
+      for (int i = 0; i < MAX_WORMS; i++) {
+        worms[i].path_capacity = 100; // Start with space for 100 points
+        worms[i].path = malloc(worms[i].path_capacity * sizeof(Point));
+        worms[i].path_length = 0;
+      }
+
+      pthread_t server_thread, input_thread;
+      pthread_create(&server_thread, NULL,
+                     (void *(*)(void *))handle_server_messages, NULL);
+      pthread_create(&input_thread, NULL, send_input_thread, NULL);
+
+      Uint32 lastTime = SDL_GetTicks();
+      const Uint8 *keystate = SDL_GetKeyboardState(NULL);
+
+      while (!quit) {
+        Uint32 currentTime = SDL_GetTicks();
+        float deltaTime = (currentTime - lastTime) / 1000.0f;
+        lastTime = currentTime;
+
+        while (SDL_PollEvent(&event) != 0) {
+          if (event.type == SDL_QUIT) {
+            quit = true;
+          } else if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+            switch (event.key.keysym.sym) {
+            case SDLK_SPACE:
+              if (!game_started) {
+                send(sock, "START", 5, 0);
+              }
+              break;
+            }
+          }
+        }
+
+        // Continuous input handling
+        pthread_mutex_lock(&input_mutex);
+        current_input.left = keystate[SDL_SCANCODE_LEFT];
+        current_input.right = keystate[SDL_SCANCODE_RIGHT];
+        current_input.up = keystate[SDL_SCANCODE_UP];
+        pthread_mutex_unlock(&input_mutex);
+
+        SDL_SetRenderDrawColor(renderer, 50, 50, 50,
+                               255); // Dark gray background
+        SDL_RenderClear(renderer);
+
+        drawPowerups(renderer);
+
+        for (int i = 0; i < num_worms; i++) {
+          drawWorm(renderer, &worms[i]);
+        }
+
+        SDL_RenderPresent(renderer);
+
+        SDL_Delay(1000 / CLIENT_TICK_RATE);
+      }
+
+      // Cleanup
+      for (int i = 0; i < MAX_WORMS; i++) {
+        free(worms[i].path);
+      }
+
+      close(sock);
+      SDL_DestroyTexture(canvas_texture);
+    }
+
+    SDL_Delay(16); // Cap the frame rate
   }
 
-  // Cleanup
-  for (int i = 0; i < MAX_WORMS; i++) {
-    free(worms[i].path);
+  if (hosting && server_pid > 0) {
+    kill(server_pid, SIGTERM);
+    int status;
+    waitpid(server_pid, &status, 0);
   }
 
-  close(sock);
-  SDL_DestroyTexture(canvas_texture);
   TTF_CloseFont(font);
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);
