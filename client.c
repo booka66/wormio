@@ -29,6 +29,9 @@
 #define DISCOVERY_PORT 8081
 #define SERVER_RESPONSE_TIMEOUT 2
 
+#define MAX_PLAYERS 6
+#define MAX_NAME_LENGTH 20
+
 typedef struct {
   float x;
   float y;
@@ -39,6 +42,11 @@ typedef struct {
   float angle;
   bool active;
 } Bullet;
+
+typedef struct {
+  int id;
+  char name[MAX_NAME_LENGTH];
+} Player;
 
 typedef struct {
   SDL_Rect rect;
@@ -106,6 +114,58 @@ TTF_Font *font = NULL;
 
 Button host_button, join_button;
 bool on_home_screen = true;
+
+Player players[MAX_PLAYERS];
+int num_players = 0;
+bool waiting_for_game_start = true;
+
+void draw_waiting_screen(SDL_Renderer *renderer) {
+  SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+  SDL_RenderClear(renderer);
+
+  SDL_Color text_color = {255, 255, 255, 255};
+
+  // Render title
+  SDL_Surface *title_surface =
+      TTF_RenderText_Blended(font, "Waiting for players...", text_color);
+  SDL_Texture *title_texture =
+      SDL_CreateTextureFromSurface(renderer, title_surface);
+  SDL_Rect title_rect = {SCREEN_WIDTH / 2 - title_surface->w / 2, 50,
+                         title_surface->w, title_surface->h};
+  SDL_RenderCopy(renderer, title_texture, NULL, &title_rect);
+  SDL_FreeSurface(title_surface);
+  SDL_DestroyTexture(title_texture);
+
+  // Render player list
+  for (int i = 0; i < num_players; i++) {
+    char player_text[MAX_NAME_LENGTH + 10];
+    snprintf(player_text, sizeof(player_text), "Player %d: %s", players[i].id,
+             players[i].name);
+    SDL_Surface *player_surface =
+        TTF_RenderText_Blended(font, player_text, text_color);
+    SDL_Texture *player_texture =
+        SDL_CreateTextureFromSurface(renderer, player_surface);
+    SDL_Rect player_rect = {SCREEN_WIDTH / 2 - player_surface->w / 2,
+                            150 + i * 40, player_surface->w, player_surface->h};
+    SDL_RenderCopy(renderer, player_texture, NULL, &player_rect);
+    SDL_FreeSurface(player_surface);
+    SDL_DestroyTexture(player_texture);
+  }
+
+  // Render "Press space to play" message
+  SDL_Surface *space_surface =
+      TTF_RenderText_Blended(font, "Press space to play", text_color);
+  SDL_Texture *space_texture =
+      SDL_CreateTextureFromSurface(renderer, space_surface);
+  SDL_Rect space_rect = {SCREEN_WIDTH / 2 - space_surface->w / 2,
+                         SCREEN_HEIGHT - 100, space_surface->w,
+                         space_surface->h};
+  SDL_RenderCopy(renderer, space_texture, NULL, &space_rect);
+  SDL_FreeSurface(space_surface);
+  SDL_DestroyTexture(space_texture);
+
+  SDL_RenderPresent(renderer);
+}
 
 void init_buttons() {
   int button_width = 200;
@@ -443,6 +503,7 @@ void handle_server_messages() {
 
     if (strncmp(buffer, "GAME_STARTED", 12) == 0) {
       game_started = true;
+      waiting_for_game_start = false;
       game_start_time = SDL_GetTicks();
       printf("Game started!\n");
     } else if (strncmp(buffer, "GAME_OVER", 9) == 0) {
@@ -451,6 +512,23 @@ void handle_server_messages() {
     } else if (strncmp(buffer, "PLAYER_ID", 9) == 0) {
       sscanf(buffer, "PLAYER_ID %d", &player_id);
       printf("Assigned player ID: %d\n", player_id);
+    } else if (strncmp(buffer, "PLAYER_UPDATE", 13) == 0) {
+      int id;
+      char name[MAX_NAME_LENGTH];
+      sscanf(buffer, "PLAYER_UPDATE %d %s", &id, name);
+      bool found = false;
+      for (int i = 0; i < num_players; i++) {
+        if (players[i].id == id) {
+          strncpy(players[i].name, name, MAX_NAME_LENGTH);
+          found = true;
+          break;
+        }
+      }
+      if (!found && num_players < MAX_PLAYERS) {
+        players[num_players].id = id;
+        strncpy(players[num_players].name, name, MAX_NAME_LENGTH);
+        num_players++;
+      }
     } else if (strncmp(buffer, "STATE", 5) == 0) {
       int count = 0;
       char *token = strtok(buffer, " ");
@@ -823,24 +901,28 @@ int main(int argc, char *args[]) {
           }
         }
 
-        // Continuous input handling
-        pthread_mutex_lock(&input_mutex);
-        current_input.left = keystate[SDL_SCANCODE_LEFT];
-        current_input.right = keystate[SDL_SCANCODE_RIGHT];
-        current_input.up = keystate[SDL_SCANCODE_UP];
-        pthread_mutex_unlock(&input_mutex);
+        if (waiting_for_game_start) {
+          draw_waiting_screen(renderer);
+        } else if (game_started) {
+          // Continuous input handling
+          pthread_mutex_lock(&input_mutex);
+          current_input.left = keystate[SDL_SCANCODE_LEFT];
+          current_input.right = keystate[SDL_SCANCODE_RIGHT];
+          current_input.up = keystate[SDL_SCANCODE_UP];
+          pthread_mutex_unlock(&input_mutex);
 
-        SDL_SetRenderDrawColor(renderer, 50, 50, 50,
-                               255); // Dark gray background
-        SDL_RenderClear(renderer);
+          SDL_SetRenderDrawColor(renderer, 50, 50, 50,
+                                 255); // Dark gray background
+          SDL_RenderClear(renderer);
 
-        drawPowerups(renderer);
+          drawPowerups(renderer);
 
-        for (int i = 0; i < num_worms; i++) {
-          drawWorm(renderer, &worms[i]);
+          for (int i = 0; i < num_worms; i++) {
+            drawWorm(renderer, &worms[i]);
+          }
+
+          SDL_RenderPresent(renderer);
         }
-
-        SDL_RenderPresent(renderer);
 
         SDL_Delay(1000 / CLIENT_TICK_RATE);
       }

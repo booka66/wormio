@@ -358,9 +358,12 @@ void handle_client(int client_socket) {
 
         initWorm(&clients[num_clients].worm, startX, startY, spawnAngle);
 
-        char id_msg[20];
-        snprintf(id_msg, sizeof(id_msg), "PLAYER_ID %d", num_clients);
-        send(client_socket, id_msg, strlen(id_msg), 0);
+        char update_msg[64];
+        snprintf(update_msg, sizeof(update_msg), "PLAYER_UPDATE %d Player%d",
+                 num_clients, num_clients + 1);
+        for (int i = 0; i < num_clients; i++) {
+          send(clients[i].socket, update_msg, strlen(update_msg), 0);
+        }
 
         num_clients++;
         printf("New client joined. Total clients: %d\n", num_clients);
